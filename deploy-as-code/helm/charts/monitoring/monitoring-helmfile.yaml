@@ -2,8 +2,9 @@ environments:
   prod:
     values:
       - namespace: monitoring
-      - ../../environments/bihar-mgramseva-prod-secrets.yaml
       - ../../environments/bihar-mgramseva-prod.yaml
+    secrets:
+      - ../../environments/bihar-mgramseva-prod-secrets.yaml
 ---
 
 repositories:
