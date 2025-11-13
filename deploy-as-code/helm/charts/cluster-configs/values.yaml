@@ -146,3 +146,7 @@ cluster-configs:
     postgres:
       namespace: jenkins
       name: postgres
+    
+    github-ssh:
+      namespace: [ bihardatamart ]
+      name: github-rsa

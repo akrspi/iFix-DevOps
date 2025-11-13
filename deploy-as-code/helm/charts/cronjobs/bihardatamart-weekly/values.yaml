@@ -1,0 +1,97 @@
+# Common Labels
+labels:
+  app: "bihardatamart"
+  group: "cronjobs"
+
+# Cron schedule
+cron:
+  schedule: "0 18 * * 5"
+  timezone: "Asia/Kolkata"
+
+# Container Configs
+namespace: "bihardatamart"
+image:
+  repository: "ghcr.io/akrspi/bihardatamart"
+  tag: "490c836"
+  pullSecrets: "github-container-registry"
+
+extraVolumes: |
+  - name: github-ssh-config
+    configMap:
+      name: github-ssh
+  - name: github-ssh
+    secret:
+      secretName: github-rsa
+
+extraVolumeMounts: |
+  - name: github-ssh-config
+    mountPath: /tmp/config
+  - name: github-ssh
+    mountPath: /tmp/id_rsa
+
+command:
+  - "/bin/sh" 
+  - "-c"
+  - |
+    set -e  # Exit immediately if any command fails
+    set -o pipefail
+
+    # Timestamped logging
+    LOG_DIR="/datamart/BiharDatamart/logs"
+    mkdir -p "$LOG_DIR"
+    LOG_FILE="$LOG_DIR/weekly_report_$(date '+%Y%m%d_%H%M%S').log"
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    echo "===== Starting Weekly Bihar Datamart Report: $(date) ====="
+
+    # Setup SSH
+    echo "Setting up SSH..."
+    mkdir -p ~/.ssh
+    ls /tmp/*
+    ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+    cp /tmp/id_rsa/id_rsa ~/.ssh/id_rsa
+    cp /tmp/config/config ~/.ssh/config
+    chmod 400 ~/.ssh/id_rsa
+    chmod 644 ~/.ssh/known_hosts
+    echo "SSH setup completed."
+
+    # Prepare directories
+    echo "Preparing directories..."
+    mkdir -p /datamart/BiharDatamart/weekly-report
+
+    # Git clone
+    echo "Cloning repository..."
+    if [ -d "~/BiharDatamart" ]; then
+      rm -rf ~/BiharDatamart
+    fi
+    git clone git@github.com:akrspi/BiharDatamart.git ~/BiharDatamart
+
+    cd ~/BiharDatamart/scripts
+
+    # Git config
+    echo "Configuring Git..."
+    git config --global user.name "hemanth-beehyv"
+    git config --global user.email "hemanthreddy.arjunagari@beehyv.com"
+
+    # Run Python script
+    echo "Running Python report..."
+    sed -i 's/uat/prod/g' Bihar_pfm_datamart_report-weekly.py
+    sed -i 's/magramseva/mgramseva/g' Bihar_pfm_datamart_report-weekly.py
+    python3 Bihar_pfm_datamart_report-weekly.py
+    git restore Bihar_pfm_datamart_report-weekly.py
+    echo "Python report completed."
+
+    # Copy report output
+    echo "Copying generated reports..."
+    cp /datamart/BiharDatamart/weekly-report/impact_datamart* ~/BiharDatamart/weekly-report || true
+
+    # Commit and push changes
+    echo "Committing and pushing reports..."..."
+    cd ~/BiharDatamart
+    git pull
+    git add .
+    git commit -m "Weekly report update" || echo "No changes to commit."
+    git push origin test-branch
+
+    echo "===== Completed Successfully: $(date) ====="
+

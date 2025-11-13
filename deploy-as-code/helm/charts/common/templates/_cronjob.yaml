@@ -1,6 +1,6 @@
 {{- define "common.cronjob" -}}
-{{- if .Capabilities.APIVersions.Has "batch/v1beta1" }}
-apiVersion: batch/v1beta1
+{{- if .Capabilities.APIVersions.Has "batch/v1" }}
+apiVersion: batch/v1
 {{- else }}
 apiVersion: batch/v2alpha1
 {{- end }}
@@ -17,6 +17,7 @@ metadata:
 spec:
   concurrencyPolicy: {{ .Values.cron.concurrencyPolicy }}
   schedule: {{ .Values.cron.schedule | quote }}
+  timeZone: {{ .Values.cron.timezone | quote }}
   jobTemplate:
     spec: 
       template:
@@ -66,4 +67,6 @@ spec:
                 {{- tpl .Values.resources . | nindent 14 }}
           {{- end }}             
           restartPolicy: {{ .Values.cron.restartPolicy }}
-{{- end -}}          
+          imagePullSecrets:
+          - name: {{ .Values.image.pullSecrets }}
+{{- end -}}

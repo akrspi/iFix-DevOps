@@ -13,7 +13,7 @@ cluster-configs:
   namespaces:
     create: true
     values:
-      [ mgramseva , cert-manager, monitoring ]  
+      [ mgramseva , cert-manager, monitoring, bihardatamart ]  
  
   rbac:
     - role: user
@@ -107,7 +107,16 @@ cluster-configs:
         echallan-services: http://echallan-services.mgramseva:8080/
         redis-host: "redis.mgramseva"
         egov-url-shortener-endpoint: "/WIMCBR/shortener"
-        
+
+    github-ssh:
+      namespace: [bihardatamart]
+      data:
+        config: |-
+          Host github.com
+            HostName github.com
+            PreferredAuthentications publickey
+            IdentityFile ~/.ssh/id_rsa
+
 billing-service:
   replicas: 2
   memory_limits: 512Mi
