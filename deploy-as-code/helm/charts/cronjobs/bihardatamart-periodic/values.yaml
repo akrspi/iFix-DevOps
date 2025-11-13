@@ -86,7 +86,7 @@ command:
     cp /datamart/BiharDatamart/periodic-report/impact_datamart* ~/BiharDatamart/periodic-report || true
 
     # Commit and push changes
-    echo "Committing and pushing reports..."..."
+    echo "Committing and pushing reports..."
     cd ~/BiharDatamart
     git pull
     git add .
