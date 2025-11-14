@@ -91,7 +91,7 @@ command:
     git pull
     git add .
     git commit -m "Weekly report update" || echo "No changes to commit."
-    git push origin test-branch
+    git push
 
     echo "===== Completed Successfully: $(date) ====="
 
