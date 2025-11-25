@@ -10,8 +10,16 @@ terraform {
   }
   required_providers {
     kubectl = {
-      source  = "gavinbunney/kubectl"
-      version = "~> 1.14.0" 
+      source  = "alekc/kubectl"
+      version = ">= 2.0.2"
+    }
+    kubernetes = {
+      source = "hashicorp/kubernetes"
+      version = "2.37.1"
+    }
+    helm = {
+      source  = "hashicorp/helm"
+      version = ">= 2.10.1, < 3.0.0"
     }
   }
 }
@@ -45,12 +53,13 @@ data "aws_caller_identity" "current" {}
 
 module "eks" {
   source          = "terraform-aws-modules/eks/aws"
-  version         = "~> 20.0"
-  cluster_name    = var.cluster_name
-  cluster_version = var.kubernetes_version
+  version         = "~> 21.0"
+  name    = var.cluster_name
+  kubernetes_version = var.kubernetes_version
+  create_cloudwatch_log_group = true
   vpc_id          = module.network.vpc_id
-  cluster_endpoint_public_access  = true
-  cluster_endpoint_private_access = true
+  endpoint_public_access  = true
+  endpoint_private_access = true
   authentication_mode = "API_AND_CONFIG_MAP"
   subnet_ids      = concat(module.network.private_subnets, module.network.public_subnets)
   node_security_group_additional_rules = {
@@ -78,7 +87,7 @@ module "eks" {
       }
     }
   }
-  cluster_addons = {
+  addons = {
     vpc-cni = {
       most_recent              = true
       before_compute           = true
@@ -90,6 +99,11 @@ module "eks" {
       })
     }
   }
+  timeouts = {
+    create = "30m"
+    delete = "15m"
+    update = "60m"
+  }
   node_security_group_tags = {
     "karpenter.sh/discovery" = var.cluster_name
   }
@@ -98,14 +112,12 @@ module "eks" {
     "Name"              = var.cluster_name
   }
 }
-
 module "eks_managed_node_group" {
-  # depends_on = [module.eks]
-  version         = "~> 20.0"
   source = "terraform-aws-modules/eks/aws//modules/eks-managed-node-group"
-  name            = "${var.cluster_name}-spot"
+  version         = "~> 21.0"
+  name            = "${var.cluster_name}"
   cluster_name    = var.cluster_name
-  cluster_version = var.kubernetes_version
+  kubernetes_version = var.kubernetes_version
   subnet_ids = slice(module.network.private_subnets, 0, length(var.availability_zones))
   vpc_security_group_ids  = [module.eks.node_security_group_id]
   cluster_service_cidr = module.eks.cluster_service_cidr
@@ -121,7 +133,6 @@ module "eks_managed_node_group" {
       }
     }
   }
-  # user_data_template_path = "user-data.yaml"
   min_size     = var.min_worker_nodes
   max_size     = var.max_worker_nodes
   desired_size = var.desired_worker_nodes
@@ -134,12 +145,52 @@ module "eks_managed_node_group" {
     AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
     SQS_POLICY                   = "arn:aws:iam::aws:policy/AmazonSQSFullAccess"
   }
+  update_config = {
+    "max_unavailable_percentage": 10
+  }
   labels = {
     Environment = var.cluster_name
   }
   tags = {
     "KubernetesCluster" = var.cluster_name
     "Name"              = var.cluster_name
+  }
+}
+
+module "ebs_csi_driver_irsa" {
+  depends_on = [module.eks]
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.20"
+  role_name_prefix = "ebs-csi-driver-"
+  attach_ebs_csi_policy = true
+  oidc_providers = {
+    main = {
+      provider_arn               = module.eks.oidc_provider_arn
+      namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
+    }
+  }
+  tags = {
+    "KubernetesCluster" = var.cluster_name
+    "Name"              = var.cluster_name
+  }
+}
+
+resource "kubernetes_storage_class" "ebs_csi_encrypted_gp3_storage_class" {
+  metadata {
+    name = "gp3"
+    annotations = {
+      "storageclass.kubernetes.io/is-default-class" : "true"
+    }
+  }
+
+  storage_provisioner    = "ebs.csi.aws.com"
+  reclaim_policy         = "Delete"
+  allow_volume_expansion = true
+  volume_binding_mode    = "Immediate"
+  parameters = {
+    fsType    = "ext4"
+    encrypted = true
+    type      = "gp3"
   }
 }
 
@@ -151,6 +202,11 @@ resource "aws_security_group_rule" "rds_db_ingress_workers" {
   security_group_id        = module.network.rds_db_sg_id
   source_security_group_id = module.eks.node_security_group_id
   type                     = "ingress"
+}
+
+data "aws_iam_openid_connect_provider" "oidc_arn" {
+  depends_on = [module.eks_managed_node_group]
+  url = data.aws_eks_cluster.cluster.identity.0.oidc.0.issuer
 }
 
 # Fetching EKS Cluster Data after its creation
@@ -180,6 +236,15 @@ resource "aws_eks_addon" "aws_ebs_csi_driver" {
   depends_on = [module.eks_managed_node_group]
   cluster_name      = var.cluster_name
   addon_name        = "aws-ebs-csi-driver"
+  service_account_role_arn = module.ebs_csi_driver_irsa.iam_role_arn
+  resolve_conflicts_on_create = "OVERWRITE"
+  resolve_conflicts_on_update = "OVERWRITE"
+}
+resource "aws_eks_addon" "eks-pod-identity-agent" {
+  count = var.enable_karpenter ? 1 : 0
+  depends_on = [module.eks_managed_node_group]
+  cluster_name      = var.cluster_name
+  addon_name        = "eks-pod-identity-agent"
   resolve_conflicts_on_create = "OVERWRITE"
 }
 
@@ -193,55 +258,27 @@ provider "kubernetes" {
   }
 }
 
-resource "kubernetes_annotations" "gp2_default" {
-  annotations = {
-    "storageclass.kubernetes.io/is-default-class" : "false"
-  }
-  api_version = "storage.k8s.io/v1"
-  kind        = "StorageClass"
-  metadata {
-    name = "gp2"
-  }
-
-  force = true
-
-  depends_on = [aws_eks_addon.aws_ebs_csi_driver]
-}
-
-resource "kubernetes_storage_class" "ebs_csi_encrypted_gp3_storage_class" {
-  metadata {
-    name = "gp3"
-    annotations = {
-      "storageclass.kubernetes.io/is-default-class" : "true"
-    }
-  }
-
-  storage_provisioner    = "ebs.csi.aws.com"
-  reclaim_policy         = "Delete"
-  allow_volume_expansion = true
-  volume_binding_mode    = "Immediate"
-  parameters = {
-    fsType    = "ext4"
-    encrypted = true
-    type      = "gp3"
-  }
-
-  depends_on = [kubernetes_annotations.gp2_default]
-}
-
 provider "helm" {
-  kubernetes ={
+  kubernetes {
     host                   = data.aws_eks_cluster.cluster.endpoint
     cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
-    token                  = data.aws_eks_cluster_auth.cluster.token
+    # token                  = data.aws_eks_cluster_auth.cluster.token
+    exec {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      args        = ["eks", "get-token", "--cluster-name", var.cluster_name]
+      command     = "aws"
+    }
   }
 }
 
 provider "kubectl" {
-  host                   = data.aws_eks_cluster.cluster.endpoint
-  cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
-  token                  = data.aws_eks_cluster_auth.cluster.token
-  load_config_file       = false
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    args        = ["eks", "get-token", "--cluster-name", var.cluster_name]
+    command     = "aws"
+  }              
 }
 
 resource "aws_iam_role_policy" "karpenter_policy" {
@@ -278,7 +315,6 @@ resource "aws_iam_role_policy" "karpenter_policy" {
 }
 
 module "karpenter" {
-  version         = "~> 20.0"
   count = var.enable_karpenter ? 1 : 0
   source = "terraform-aws-modules/eks/aws//modules/karpenter"
   cluster_name = module.eks.cluster_name

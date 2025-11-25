@@ -54,7 +54,7 @@ done
 # Step 3: Loop through each cleaned volume ID and create a snapshot
 for volume_id in "${CLEANED_VOLUME_IDS[@]}"; do
     # Create a unique description for the snapshot
-    DESCRIPTION="Snapshot for volume $volume_id from cluster $CLUSTER_NAME on $(date +'%Y-%m-%d %H:%M:%S') before upgrading to eks 1.31"
+    DESCRIPTION="Snapshot for volume $volume_id from cluster $CLUSTER_NAME on $(date +'%Y-%m-%d %H:%M:%S') before upgrading to eks 1.32"
     create_snapshot "$volume_id" "$DESCRIPTION"
 done
 
