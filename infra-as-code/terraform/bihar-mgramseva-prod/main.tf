@@ -19,7 +19,7 @@ terraform {
     }
     helm = {
       source  = "hashicorp/helm"
-      version = ">= 2.10.1, < 3.0.0"
+      version = ">= 3.0.0"
     }
   }
 }
@@ -157,14 +157,14 @@ module "eks_managed_node_group" {
   }
 }
 
-module "ebs_csi_driver_irsa" {
+module "ebs_csi_irsa" {
   depends_on = [module.eks]
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "~> 5.20"
-  role_name_prefix = "ebs-csi-driver-"
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts"
+  version = "6.6.1"
+  name = "ebs-csi-driver-${var.cluster_name}"
   attach_ebs_csi_policy = true
   oidc_providers = {
-    main = {
+    this = {
       provider_arn               = module.eks.oidc_provider_arn
       namespace_service_accounts = ["kube-system:ebs-csi-controller-sa"]
     }
@@ -236,7 +236,7 @@ resource "aws_eks_addon" "aws_ebs_csi_driver" {
   depends_on = [module.eks_managed_node_group]
   cluster_name      = var.cluster_name
   addon_name        = "aws-ebs-csi-driver"
-  service_account_role_arn = module.ebs_csi_driver_irsa.iam_role_arn
+  service_account_role_arn = module.ebs_csi_irsa.arn
   resolve_conflicts_on_create = "OVERWRITE"
   resolve_conflicts_on_update = "OVERWRITE"
 }
@@ -259,11 +259,10 @@ provider "kubernetes" {
 }
 
 provider "helm" {
-  kubernetes {
+  kubernetes = {
     host                   = data.aws_eks_cluster.cluster.endpoint
     cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
-    # token                  = data.aws_eks_cluster_auth.cluster.token
-    exec {
+    exec  = {
       api_version = "client.authentication.k8s.io/v1beta1"
       args        = ["eks", "get-token", "--cluster-name", var.cluster_name]
       command     = "aws"
@@ -272,8 +271,10 @@ provider "helm" {
 }
 
 provider "kubectl" {
-  host                   = module.eks.cluster_endpoint
-  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  host                   = data.aws_eks_cluster.cluster.endpoint
+  cluster_ca_certificate = base64decode(data.aws_eks_cluster.cluster.certificate_authority[0].data)
+  load_config_file       = false
+  lazy_load              = true
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
     args        = ["eks", "get-token", "--cluster-name", var.cluster_name]
