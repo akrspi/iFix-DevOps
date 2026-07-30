@@ -38,7 +38,7 @@ module "db" {
   vpc_security_group_ids        = ["${module.network.rds_db_sg_id}"]
   availability_zone             = "${element(var.availability_zones, 0)}"
   instance_class                = "db.t4g.medium"  ## postgres db instance type
-  engine_version                = "15.12"   ## postgres version
+  engine_version                = "15.17"   ## postgres version
   storage_type                  = "gp3"
   storage_gb                    = "100"     ## postgres disk size
   backup_retention_days         = "7"
@@ -303,11 +303,14 @@ resource "aws_iam_role_policy" "karpenter_policy" {
           "ec2:DescribeLaunchTemplates",
           "ec2:CreateLaunchTemplate",
           "iam:GetInstanceProfile",
+          "iam:TagInstanceProfile",
           "ec2:CreateTags",
           "ec2:CreateFleet",
           "ec2:RunInstances",
           "ec2:DeleteLaunchTemplate",
-          "ec2:TerminateInstances"
+          "ec2:TerminateInstances",
+          "iam:RemoveRoleFromInstanceProfile",
+          "iam:DeleteInstanceProfile"
         ],
         "Resource": "*"
       }
@@ -318,6 +321,7 @@ resource "aws_iam_role_policy" "karpenter_policy" {
 module "karpenter" {
   count = var.enable_karpenter ? 1 : 0
   source = "terraform-aws-modules/eks/aws//modules/karpenter"
+  version = "21.24.0"
   cluster_name = module.eks.cluster_name
 
   create_node_iam_role = false
@@ -339,7 +343,7 @@ resource "helm_release" "karpenter-crd" {
   name                = "karpenter-crd"
   repository          = "oci://public.ecr.aws/karpenter"
   chart               = "karpenter-crd"
-  version             = "1.0.8"
+  version             = "1.13.0"
   wait                = true
   values = []
 }
@@ -351,12 +355,13 @@ resource "helm_release" "karpenter" {
   name                = "karpenter"
   repository          = "oci://public.ecr.aws/karpenter"
   chart               = "karpenter"
-  version             = "1.0.8"
+  version             = "1.13.0"
   wait                = false
   skip_crds           = true
 
   values = [
     <<-EOT
+    logLevel: info
     serviceAccount:
       name: ${var.enable_karpenter ? module.karpenter[0].service_account : ""}
     settings:
@@ -377,7 +382,7 @@ resource "kubectl_manifest" "karpenter_node_class" {
     spec:
       amiFamily: AL2023
       amiSelectorTerms:
-      - id: ami-0d1008f82aca87cb9
+      - alias: al2023@latest
       role: ${module.eks_managed_node_group.iam_role_name}
       subnetSelectorTerms:
         - tags:
@@ -385,17 +390,15 @@ resource "kubectl_manifest" "karpenter_node_class" {
       securityGroupSelectorTerms:
         - tags:
             karpenter.sh/discovery: ${module.eks.cluster_name}
+      blockDeviceMappings:
+      - deviceName: /dev/xvda
+        ebs:
+          volumeSize: 100Gi
+          volumeType: gp3
+          encrypted: true
+          deleteOnTermination: true
       tags:
         karpenter.sh/discovery: ${module.eks.cluster_name}
-    status:
-  amis:
-  - id: var.ami_id.id
-    name: var.ami_id.name
-    requirements:
-    - key: kubernetes.io/arch
-      operator: In
-      values:
-      - amd64
   YAML
 
   depends_on = [
@@ -413,8 +416,6 @@ resource "kubectl_manifest" "karpenter_node_pool" {
     spec:
       template:
         spec:
-          kubelet:
-            maxPods: 40
           nodeClassRef:
             name: default
             group: karpenter.k8s.aws  # Updated since only a single version will be served
@@ -422,22 +423,25 @@ resource "kubectl_manifest" "karpenter_node_pool" {
           requirements:
             - key: "karpenter.k8s.aws/instance-category"
               operator: In
-              values: ["c", "m", "r", "t", "a"]
+              values: ["r", "m"]
+            - key: "karpenter.k8s.aws/instance-family"
+              operator: In
+              values: ["r6g", "r7g", "m6g", "m7g"]
+            - key: "node.kubernetes.io/instance-type"
+              operator: Exists
+              values: ["m5ad.xlarge", "r5ad.xlarge"]
             - key: "karpenter.k8s.aws/instance-cpu"
               operator: In
-              values: ["2", "4", "8", "16", "32"]
+              values: ["2", "4"]
             - key: "kubernetes.io/arch"
               operator: In
-              values: ["amd64"]
-            - key: "karpenter.k8s.aws/instance-hypervisor"
-              operator: In
-              values: ["nitro"]
+              values: ["arm64"]
             - key: "karpenter.sh/capacity-type"
               operator: In
-              values: ["spot"]
+              values: ["spot", "on-demand"]
             - key: "karpenter.k8s.aws/instance-generation"
               operator: Gt
-              values: ["2"]
+              values: ["5"]
       disruption:
         consolidationPolicy: WhenEmptyOrUnderutilized
         consolidateAfter: 1m
@@ -450,7 +454,6 @@ resource "kubectl_manifest" "karpenter_node_pool" {
           reasons: 
           - "Underutilized"
   YAML
-
   depends_on = [
     kubectl_manifest.karpenter_node_class
   ]
